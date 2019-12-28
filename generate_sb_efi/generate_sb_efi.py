@@ -2,46 +2,79 @@
 # -*- coding: utf-8 -*-
 
 # stdlib modules
-import configparser
+import configparser, subprocess
 from pathlib import Path
 from shutil import copyfile
-from pathlib import Path
+from typing import Dict, List
 
 # external modules
-import subprocess
 import click
 
-class KernelException(Exception):
+
+class SubprocessError(Exception):
     pass
+
+
+def subrun(command: List[str], expected_return: int = 0, print_failure: bool = True):
+    result = subprocess.run(command, capture_output=True)
+    if result.returncode != expected_return:
+        if print_failure:
+            default_encoding = 'utf-8'
+            print('==> Command:')
+            print(command)
+            print('==> Output:')
+            print(result.stdout.decode(default_encoding))
+            print('==> Error:')
+            print(result.stderr.decode(default_encoding))
+
+        raise SubprocessError(f'There was an error with the {command[0]} operation.')
 
 
 class Kernel():
     '''Class that stores the parameters related to each kernel that will be
     used to build a single file EFI executable.
     '''
-    def __init__(self, kernel_path: Path, config: dict):
+    def __init__(
+            self,
+            kernel_path: Path,
+            config: Dict[str, str],
+            key_prefix: str,
+            initramfs_types: List[str] = ['', '-fallback']):
         '''Args:
         '''
         # Prefix of the kernel files
-        self.prefix = config['prefix']
-        # Prefix of the initramfs files
-        self.initramfs_prefix = config['initramfs']
-        # Name of the microcode image
-        self.ucode_name = config['ucode']
+        self.prefix = config['prefix'] 
         # Command line used on the kernel
         self.cmdline = config['cmdline']
+
+        # Key information and verification of permission
+        self.key_path = Path(f'{key_prefix}.key')
+        self.crt_path = Path(f'{key_prefix}.crt')
+
+        # Optional files
+        # Prefix of the initramfs files
+        self.initramfs_prefix = config.get('initramfs')
+        # Name of the microcode image
+        self.ucode_name = config.get('ucode')
+
+        # Optional flags
+        # Define if the fallback image will be copied
+        self.use_fallback = config.getboolean('use_fallback', False)
+        # Defined if copies will also be copied to bootdir
+        self.create_copy_bootdir = config.getboolean('create_copy_bootdir', False)
 
         # Retrieving kernel info
         self.path = kernel_path
         self.kernel_name = self.path.name
 
-        # Verify if kernel file has already been signed
-        self.signed = 'signed' in self.kernel_name
-        self.valid = (self.signed and config.getboolean('use_signed')) or not self.signed
+        # Types of initramfs images that will be used
+        self.initramfs_types = initramfs_types
 
-        if self.valid:
-            self.extract_version()
-            self.find_initramfs()
+        # Folder where the copies of the images are kept
+        self.copydir = Path(config['bootdir']) / 'signed-copy'
+
+        self.extract_version()
+        self.find_initramfs()
 
 
     def extract_version(self):
@@ -49,28 +82,36 @@ class Kernel():
         '''
         self.kernel_name = self.path.name
         self.version = self.kernel_name[len(self.prefix)::]
-        if self.signed:
-            raise KernelException('Signed kernel handling not implemented yet')
 
 
     def find_initramfs(self):
         '''Locate the initramfs file of each kernel, both normal and fallback.
-        Also microcode.
+        Locate the microcode as well.
         '''
-        self.initramfs = self.path.parent / f'{self.initramfs_prefix}{self.version}.img'
-        if not self.initramfs.exists():
-            raise FileNotFoundError('Initramfs doesn\'t exist.')
+        if self.initramfs_prefix is None:
+            self.initramfs = None
+        else:
+            self.initramfs = {
+                    suffix: self.path.parent / f'{self.initramfs_prefix}{self.version}{suffix}.img'
+                    for suffix in self.initramfs_types
+                    }
+            for key in self.initramfs_types:
+                if not self.initramfs[key].exists():
+                    name = self.initramfs[key]
+                    raise FileNotFoundError(f'Initramfs {name} doesn\'t exist.')
 
-        self.initramfs_fallback = self.path.parent / f'{self.initramfs_prefix}{self.version}-fallback.img'
-        if not self.initramfs_fallback.exists():
-            raise FileNotFoundError('Fallback initramfs doesn\'t exist.')
-
-        self.ucode = self.path.parent / self.ucode_name
-        if not self.ucode.exists():
-            raise FileNotFoundError('Microcode doesn\'t exist.')
+        if self.ucode_name is None:
+            self.ucode = None
+        else:
+            self.ucode = self.path.parent / self.ucode_name
+            if not self.ucode.exists():
+                name = self.ucode
+                raise FileNotFoundError(f'Microcode {name} doesn\'t exist.')
 
 
     def build(self, builddir: Path):
+        '''Build and sign the kernel image.
+        '''
         self.builddir = builddir / self.version
         self.builddir.mkdir(parents=True, exist_ok=True)
 
@@ -78,22 +119,26 @@ class Kernel():
         with open(self.builddir / 'cmdline.txt', 'w') as cmdline_file:
             cmdline_file.write(self.cmdline + '\n')
 
-        def extract_initramfs(initramfs, initramfs_name):
+        def extract_initramfs(initramfs_type: str):
             '''Extract the gzip compressed initramfs, and concatenate it with
             microcode.
             '''
-            with open(self.builddir / f'initramfs{initramfs_name}.img', 'wb') as initramfs_file:
-                initramfs_content = subprocess.run(['zcat', initramfs], capture_output=True)
-                initramfs_file.write(initramfs_content.stdout)
+            initramfs_path = self.initramfs[initramfs_type]
+
+            with open(self.builddir / f'initramfs{initramfs_type}', 'wb') as initramfs_file:
+                if self.initramfs_prefix is not None:
+                    initramfs_content = subprocess.run(['zcat', initramfs_path], capture_output=True)
+                    initramfs_file.write(initramfs_content.stdout)
 
                 # Concatenate microcode with initramfs
-                with open(self.ucode, 'rb') as ucode_file:
-                    initramfs_file.write(ucode_file.read())
+                if self.ucode_name is not None:
+                    with open(self.ucode, 'rb') as ucode_file:
+                        initramfs_file.write(ucode_file.read())
 
-        def assemble_single_file(initramfs_name):
+        def assemble_single_file(initramfs_type: str):
             '''Assemble all files into a single image, and sign it.
             '''
-            def add_section(section, file_name, offset):
+            def add_section(section: str, file_name: Path, offset: str):
                 return ['--add-section', f'{section}={file_name}',
                         '--change-section-vma', f'{section}={offset}'
                         ]
@@ -101,40 +146,64 @@ class Kernel():
             sections = [('.osrel', Path('/etc/os-release'), '0x20000'),
                         ('.cmdline', self.builddir / 'cmdline.txt', '0x30000'),
                         ('.linux', self.path, '0x40000'),
-                        ('.initrd', self.builddir / f'initramfs{initramfs_name}.img', '0x3000000')
+                        ('.initrd', self.builddir / f'initramfs{initramfs_type}', '0x3000000')
                         ]
+
             sections_command = []
             for section in sections:
                 sections_command += add_section(*section)
 
-            self.target[initramfs_name] = Path(str(self.builddir / f'{self.kernel_name}{initramfs_name}'))
-            command = ['objcopy'] + sections_command + ['/usr/lib/systemd/boot/efi/linuxx64.efi.stub', self.target[initramfs_name]]
-            objcopy_result = subprocess.run(command, capture_output=True)
+            self.target[initramfs_type] = Path(self.builddir / f'{self.kernel_name}{initramfs_type}')
 
-            self.result[initramfs_name] = Path(f'{str(self.target[initramfs_name])}.signed.efi')
-            sbsign_result = subprocess.run(['sbsign',
-                                            '--key', '/etc/refind.d/keys/refind_local.key',
-                                            '--cert', '/etc/refind.d/keys/refind_local.crt',
-                                            '--output', self.result[initramfs_name],
-                                            self.target[initramfs_name]
-                                            ],
-                                           capture_output=True)
-            print(f'Signed {self.result[initramfs_name].name}!')
+            command = ['objcopy'] + sections_command + ['/usr/lib/systemd/boot/efi/linuxx64.efi.stub', self.target[initramfs_type]]
+            subrun(command)
+
+            self.result[initramfs_type] = Path(
+                    self.target[initramfs_type].parent / f'{self.target[initramfs_type].name}.signed.efi'
+                    )
+
+            command = [
+                'sbsign',
+                '--key', self.key_path,
+                '--cert', self.crt_path,
+                '--output', self.result[initramfs_type],
+                self.target[initramfs_type]
+                ]
+            subrun(command)
+
+            print(f'Signed {self.result[initramfs_type].name}!')
 
         self.target = {}
         self.result = {}
 
-        extract_initramfs(self.initramfs, '')
-        assemble_single_file('')
-        extract_initramfs(self.initramfs_fallback, '-fallback')
-        assemble_single_file('-fallback')
+        for initramfs_type in self.initramfs_types:
+            extract_initramfs(initramfs_type)
+            assemble_single_file(initramfs_type)
 
 
     def write(self, targetdir: Path):
         targetdir.mkdir(parents=True, exist_ok=True)
-        for initramfs_name in self.result.keys():
-            copyfile(self.result[initramfs_name], targetdir / self.target[initramfs_name].name)
-            print(f'Copied {self.target[initramfs_name].name}!')
+
+        if self.create_copy_bootdir:
+            self.copydir.mkdir(parents=True, exist_ok=True)
+
+        for initramfs_type in self.initramfs_types:
+            if self.create_copy_bootdir:
+                signed_name = f'{self.target[initramfs_type].name}.signed'
+                copyfile(
+                        self.result[initramfs_type],
+                        self.copydir / signed_name
+                        )
+                print(f'Copied {signed_name} to {self.copydir}!')
+
+            if 'fallback' in initramfs_type and not self.use_fallback:
+                continue
+
+            copyfile(
+                    self.result[initramfs_type],
+                    targetdir / self.target[initramfs_type].name
+                    )
+            print(f'Copied {self.target[initramfs_type].name}!')
 
 
 @click.command()
@@ -147,12 +216,11 @@ def cli(**kwargs):
     source_config = config['source']
 
     bootdir = Path(source_config['bootdir'])
-    builddir = Path(config['build']['builddir'])
-    targetdir = Path(config['write']['targetdir'])
+    builddir = Path(config['artifacts']['builddir'])
+    targetdir = Path(config['artifacts']['targetdir'])
     prefix = source_config['prefix']
 
-    kernels = [Kernel(kernel, config=source_config) for kernel in bootdir.glob(f'{prefix}*')]
-    kernels = [kernel for kernel in kernels if kernel.valid]
+    kernels = [Kernel(kernel, config=source_config, key_prefix=config['keys']['prefix']) for kernel in bootdir.glob(f'{prefix}*')]
     [kernel.build(builddir) for kernel in kernels]
     [kernel.write(targetdir) for kernel in kernels]
 
