@@ -5,11 +5,15 @@
 import configparser, subprocess
 from pathlib import Path
 from shutil import copyfile
-from typing import Dict, List
+from typing import Dict, List, Union
 
 # external modules
 import click
 
+config_dict_type = Dict[str, Union[bool, int, str]]
+
+default_encoding = 'utf-8'
+dry_run = False
 
 class SubprocessError(Exception):
     pass
@@ -19,7 +23,6 @@ def subrun(command: List[str], expected_return: int = 0, print_failure: bool = T
     result = subprocess.run(command, capture_output=True)
     if result.returncode != expected_return:
         if print_failure:
-            default_encoding = 'utf-8'
             print('==> Command:')
             print(command)
             print('==> Output:')
@@ -29,6 +32,8 @@ def subrun(command: List[str], expected_return: int = 0, print_failure: bool = T
 
         raise SubprocessError(f'There was an error with the {command[0]} operation.')
 
+    return result
+
 
 class Kernel():
     '''Class that stores the parameters related to each kernel that will be
@@ -37,7 +42,7 @@ class Kernel():
     def __init__(
             self,
             kernel_path: Path,
-            config: Dict[str, str],
+            config: config_dict_type,
             key_prefix: str,
             initramfs_types: List[str] = ['', '-fallback']):
         '''Args:
@@ -61,7 +66,9 @@ class Kernel():
         # Define if the fallback image will be copied
         self.use_fallback = config.getboolean('use_fallback', False)
         # Defined if copies will also be copied to bootdir
-        self.create_copy_bootdir = config.getboolean('create_copy_bootdir', False)
+        # Folder where the copies of the images are kept
+        copydir = config.get('copydir', None)
+        self.copydir = Path(copydir) if copydir is not None else None
 
         # Retrieving kernel info
         self.path = kernel_path
@@ -69,9 +76,6 @@ class Kernel():
 
         # Types of initramfs images that will be used
         self.initramfs_types = initramfs_types
-
-        # Folder where the copies of the images are kept
-        self.copydir = Path(config['bootdir']) / 'signed-copy'
 
         self.extract_version()
         self.find_initramfs()
@@ -184,11 +188,11 @@ class Kernel():
     def write(self, targetdir: Path):
         targetdir.mkdir(parents=True, exist_ok=True)
 
-        if self.create_copy_bootdir:
+        if self.copydir is not None:
             self.copydir.mkdir(parents=True, exist_ok=True)
 
         for initramfs_type in self.initramfs_types:
-            if self.create_copy_bootdir:
+            if self.copydir is not None:
                 signed_name = f'{self.target[initramfs_type].name}.signed'
                 copyfile(
                         self.result[initramfs_type],
@@ -206,9 +210,36 @@ class Kernel():
             print(f'Copied {self.target[initramfs_type].name}!')
 
 
+def clean(targetdir: Path):
+    '''Deletes all top level files inside a given directory.
+    '''
+    if targetdir.exists() and targetdir.is_dir():
+        [file.unlink() for file in targetdir.iterdir() if file.is_file()]
+        print(f'Cleaned {str(targetdir)}!')
+    else:
+        print(f'{str(targetdir)} isn\'t a directory or doesn\'t exist.')
+
+
+def efibootmgr(kernel: List[Kernel], targetdir: Path):
+    pass
+
+
+def refind(targetdir: Path):
+    '''Adds a dummy refind conf file to the target directory.
+    '''
+    refind_path = targetdir / 'refind_linux.conf'
+    if not refind_path.exists():
+        with open(refind_path, 'w') as refind_file:
+            refind_file.write('"Boot"  ""')
+        print(f'Wrote {refind_path}!')
+    else:
+        print(f'{refind_path} already exists!')
+
+
 @click.command()
 @click.option('-c', '--conf', default='/etc/generate-sb-efi.conf', type=click.File('r'))
-@click.option('--refind', is_flag=True, default=False)
+@click.option('-C', '--clean', is_flag=True, default=False)
+@click.option('--clean-copies', is_flag=True, default=False)
 @click.option('-d', '--dry-run', is_flag=True, default=False)
 def cli(**kwargs):
     config = configparser.ConfigParser()
@@ -220,18 +251,30 @@ def cli(**kwargs):
     targetdir = Path(config['artifacts']['targetdir'])
     prefix = source_config['prefix']
 
-    kernels = [Kernel(kernel, config=source_config, key_prefix=config['keys']['prefix']) for kernel in bootdir.glob(f'{prefix}*')]
+    global dry_run
+    dry_run = kwargs['dry_run']
+
+    # if told to clean copies, only cleans them and then exits
+    if kwargs['clean_copies']:
+        copydir = Path(source_config['copydir'])
+        clean(copydir)
+        return
+
+    if kwargs['clean']:
+        clean(targetdir)
+
+    kernels = [
+            Kernel(kernel, config=source_config, key_prefix=config['keys']['prefix'])
+            for kernel in bootdir.glob(f'{prefix}*')
+            ]
     [kernel.build(builddir) for kernel in kernels]
     [kernel.write(targetdir) for kernel in kernels]
 
-    if kwargs['refind']:
-        refind_path = targetdir / 'refind_linux.conf'
-        if not refind_path.exists():
-            with open(refind_path, 'w') as refind_file:
-                refind_file.write('"Boot"  ""')
-            print(f'Wrote {refind_path}!')
-        else:
-            print(f'{refind_path} already exists!')
+    if config['post'].getboolean('boot_entry', False):
+        efibootmgr(kernels, targetdir)
+
+    if config['post'].getboolean('refind', False):
+        refind(targetdir)
 
 
 if __name__ == '__main__':
