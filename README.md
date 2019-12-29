@@ -1,4 +1,4 @@
-# Automating generation of single file signed EFI kernels
+# Automate generation of Secure Boot signed single file kernel images
 
 ## Motivation
 
@@ -10,5 +10,9 @@ Unfortunately, this can quickly become a gargantuan task for maintenance, especi
 
 ## Configuration
 
-Currently, configuration is done through the `/etc/generate-sb-efi.conf` file, which contains the configuration for the whole process of generating the signed kernel images.
+Currently, configuration is done through the `/etc/generate-sb-efi.conf` file, which contains the configuration for the whole process of generating the signed kernel images. An example can be found inside `res/generate-sb-efi.conf`.
+
+## External libraries
+
+This program currently requires the click library for parsing command line arguments.
 
