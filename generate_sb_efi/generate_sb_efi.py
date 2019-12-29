@@ -6,6 +6,7 @@ import configparser, subprocess
 from pathlib import Path
 from shutil import copyfile
 from typing import Dict, List, Union
+from concurrent.futures import ThreadPoolExecutor
 
 # external modules
 import click
@@ -263,12 +264,15 @@ def cli(**kwargs):
     if kwargs['clean']:
         clean(targetdir)
 
+    def kernel_proc(kernel):
+        kernel.build(builddir)
+        kernel.write(targetdir)
     kernels = [
             Kernel(kernel, config=source_config, key_prefix=config['keys']['prefix'])
             for kernel in bootdir.glob(f'{prefix}*')
             ]
-    [kernel.build(builddir) for kernel in kernels]
-    [kernel.write(targetdir) for kernel in kernels]
+    with ThreadPoolExecutor() as executor:
+        executor.map(kernel_proc, kernels)
 
     if config['post'].getboolean('boot_entry', False):
         efibootmgr(kernels, targetdir)
