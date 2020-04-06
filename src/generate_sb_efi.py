@@ -192,6 +192,7 @@ class Kernel():
         if self.copydir is not None:
             self.copydir.mkdir(parents=True, exist_ok=True)
 
+        self.targetpath = {}
         for initramfs_type in self.initramfs_types:
             if self.copydir is not None:
                 signed_name = f'{self.target[initramfs_type].name}.signed'
@@ -201,12 +202,14 @@ class Kernel():
                         )
                 print(f'Copied {signed_name} to {self.copydir}!')
 
+            self.targetpath[initramfs_type] = targetdir / self.target[initramfs_type].name
+
             if 'fallback' in initramfs_type and not self.use_fallback:
                 continue
 
             copyfile(
                     self.result[initramfs_type],
-                    targetdir / self.target[initramfs_type].name
+                    self.targetpath[initramfs_type]
                     )
             print(f'Copied {self.target[initramfs_type].name}!')
 
@@ -221,8 +224,38 @@ def clean(targetdir: Path):
         print(f'{str(targetdir)} isn\'t a directory or doesn\'t exist.')
 
 
-def efibootmgr(kernel: List[Kernel], targetdir: Path):
-    pass
+def efibootmgr(kernels: List[Kernel], targetdir: Path):
+    '''Cleans the boot entries related to the kernel location, and adds new ones.
+    '''
+    command = ['efibootmgr', '-v']
+    list_entries = subrun(command)
+    stdout = list_entries.stdout.decode(default_encoding)
+
+    entries = stdout.split('\n')[3:-1]
+    entries_parts = [entry.split('/') for entry in entries]
+    entries_number = [entry.split('*')[0].strip('Boot') for entry in entries]
+
+    entries_file = {}
+    parent_path = targetdir.parent.parent
+    for number, entry in zip(entries_number, entries_parts):
+        for part in entry:
+            if 'File' in part:
+                parts = part.strip('File(').strip(')').split('\\')[1::]
+                path = parent_path
+                for part in parts:
+                    path /= part
+                entries_file[number] = path
+
+    for kernel in kernels:
+        for initramfs_type in kernel.initramfs_types:
+            target = kernel.targetpath[initramfs_type]
+            if target in entries_file.values():
+                print(f'Existing target: {target}')
+                command = [
+                        'efibootmgr',
+                        ''
+                        ]
+                # sudo efibootmgr -c -d /dev/nvme0n1 -p 1 -L Manjaro3 -l '\EFI\Manjaro\vmlinuz-5.3-x86_64'
 
 
 def refind(targetdir: Path):

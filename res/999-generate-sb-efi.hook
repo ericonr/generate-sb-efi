@@ -1,0 +1,10 @@
+[Trigger]
+Operation=Upgrade
+Type=Package
+Target=linux*
+
+[Action]
+Description = Generating single file EFI images...
+When=PostTransaction
+Exec=/usr/local/bin/generate_sb_efi.py -C
+

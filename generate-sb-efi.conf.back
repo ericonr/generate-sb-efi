@@ -1,0 +1,17 @@
+[source]
+bootdir = /boot
+prefix = vmlinuz-
+initramfs = initramfs-
+ucode = intel-ucode.img
+use_signed = False
+cmdline = root=UUID=8e493690-bdc3-41a5-933f-123123sd12123 rw rootfstype=btrfs rootflags=subvol=@ audit=0 loglevel=3 add_efi_memmap
+
+[keys]
+prefix = /etc/refind.d/keys/refind_local
+
+[build]
+builddir = /tmp/efi
+
+[write]
+targetdir = /tmp/Manjaro
+
