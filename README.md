@@ -13,7 +13,13 @@ Unfortunately, this can quickly become a gargantuan task for maintenance, especi
 
 ## Configuration
 
-Currently, configuration is done through the `/etc/generate-sb-efi.conf` file, which contains the configuration for the whole process of generating the signed kernel images. An example can be found inside `res/generate-sb-efi.conf`.
+Currently, configuration is done through the `/etc/generate-sb-efi.conf` file, which contains the configuration for the whole process of generating the signed kernel images. An example can be found inside `res/`.
+
+A hook for `pacman` can be found in the `res/` directory as well. Any update to `linux*` packages triggers it. It assumes the script is located at `/usr/local/bin` and also cleans up the target directory for the packages.
+
+## Installation
+
+An install script is offered as well!
 
 ## External libraries
 
